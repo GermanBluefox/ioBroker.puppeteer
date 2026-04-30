@@ -133,11 +133,32 @@ sendTo('puppeteer.0', 'screenshot', { url: 'https://www.google.com',
 });
 ```
 
+## Web server
+The adapter also provides a web server which allows to trigger screenshots by calling a link.
+The web server is active when the adapter is running and listens on port 10000 (configurable) by default.
+You can trigger a screenshot by calling `http://<ioBroker-IP>:10000?url=<URL>` where URL is the url you want to screenshot.
+You can also specify additional parameters:
+- `fullPage=true` to take a screenshot of the full page
+- `waitForSelector=#testId` to wait for a given selector before taking the screenshot
+- `renderTime=5000` to wait for a given time in ms before taking the screenshot
+- `width=800&height=600` to specify the viewport size for the screenshot
+- `clipLeft=0&clipTop=0&clipWidth=800&clipHeight=600` to specify the crop options for the screenshot
+- `quality=80` to specify the quality of the screenshot (only for jpg)
+- `omitBackground=true` to hide the default white background and allow capturing screenshots with transparency
+- `encoding=base64` to specify the encoding of the image (default is binary)
+- `captureBeyondViewport=true` to allow taking screenshots bigger than the viewport (default is true)
+- `type=jpg/png` to specify the type of the screenshot (default is png)
+
+The response is the binary representation of the image which can be directly displayed in the browser or base64 string as `{ result: "base64" }` depending on the specified encoding.
+
 ## Changelog
 <!--
     Placeholder for the next version (at the beginning of the line):
     ### **WORK IN PROGRESS**
 -->
+### **WORK IN PROGRESS**
+* (@GermanBluefox) Allowed to make a screenshot by calling a link
+
 ### 0.4.0 (2024-09-17)
 * (@foxriver76) updated puppeteer dependency
 * (@foxriver76) allow to specify an external browser for puppeteer
@@ -177,7 +198,7 @@ sendTo('puppeteer.0', 'screenshot', { url: 'https://www.google.com',
 ## License
 MIT License
 
-Copyright (c) 2024 Moritz Heusinger <moritz.heusinger@gmail.com>
+Copyright (c) 2024-2026 Moritz Heusinger <moritz.heusinger@gmail.com>
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

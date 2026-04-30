@@ -21,13 +21,25 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
   mod
 ));
+var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
+var main_exports = {};
+module.exports = __toCommonJS(main_exports);
 var utils = __toESM(require("@iobroker/adapter-core"));
 var import_puppeteer = __toESM(require("puppeteer"));
 var import_tools = require("./lib/tools");
-var import_path = require("path");
+var import_node_path = require("node:path");
+var import_webserver = require("@iobroker/webserver");
+var import_express = __toESM(require("express"));
+var import_cookie_parser = __toESM(require("cookie-parser"));
+var import_body_parser = __toESM(require("body-parser"));
+var import_adapter_core = require("@iobroker/adapter-core");
 class PuppeteerAdapter extends utils.Adapter {
   constructor(options = {}) {
     super({ ...options, name: "puppeteer" });
+    this.webServer = {
+      app: null,
+      server: null
+    };
     this.on("ready", this.onReady.bind(this));
     this.on("stateChange", this.onStateChange.bind(this));
     this.on("unload", this.onUnload.bind(this));
@@ -38,6 +50,14 @@ class PuppeteerAdapter extends utils.Adapter {
    */
   async onReady() {
     let additionalArgs;
+    if (this.config.secure) {
+      await new Promise(
+        (resolve2) => this.getCertificates(void 0, void 0, void 0, (_err, certificates) => {
+          this.certificates = certificates;
+          resolve2();
+        })
+      );
+    }
     if (this.config.additionalArgs) {
       additionalArgs = this.config.additionalArgs.map((entry) => entry.Argument);
     }
@@ -50,6 +70,9 @@ class PuppeteerAdapter extends utils.Adapter {
     });
     this.subscribeStates("url");
     this.log.info("Ready to take screenshots");
+    if (this.config.allowWebAccess) {
+      await this.initWebServer();
+    }
   }
   /**
    * Is called when adapter shuts down - callback has to be called under any circumstances!
@@ -57,6 +80,14 @@ class PuppeteerAdapter extends utils.Adapter {
    * @param callback callback which needs to be called
    */
   async onUnload(callback) {
+    try {
+      if (this.webServer.server) {
+        this.log.info(`terminating http${this.config.secure ? "s" : ""} server on port ${this.config.port}`);
+        this.webServer.server.close();
+        this.webServer.server = null;
+      }
+    } catch {
+    }
     try {
       if (this.browser) {
         this.log.info("Closing browser");
@@ -213,12 +244,12 @@ class PuppeteerAdapter extends utils.Adapter {
    * @param path path to check
    */
   validatePath(path) {
-    path = (0, import_path.resolve)((0, import_path.normalize)(path));
+    path = (0, import_node_path.resolve)((0, import_node_path.normalize)(path));
     this.log.debug(`Checking path "${path}"`);
     if (path.startsWith(utils.getAbsoluteDefaultDataDir())) {
       throw new Error("Screenshots cannot be stored inside the ioBroker storage");
     }
-    if (path.includes(`${import_path.sep}node_modules${import_path.sep}`)) {
+    if (path.includes(`${import_node_path.sep}node_modules${import_node_path.sep}`)) {
       throw new Error("Screenshots cannot be stored inside a node_modules folder");
     }
   }
@@ -268,6 +299,183 @@ class PuppeteerAdapter extends utils.Adapter {
     }
     delete options.viewportOptions;
     return viewportOptions;
+  }
+  async initWebServer() {
+    this.config.port = parseInt(this.config.port || "10000", 10);
+    this.webServer.app = (0, import_express.default)();
+    if (this.config.port) {
+      if (this.config.secure && !this.certificates) {
+        return;
+      }
+      try {
+        const webserver = new import_webserver.WebServer({
+          app: this.webServer.app,
+          adapter: this,
+          secure: this.config.secure
+        });
+        this.webServer.server = await webserver.init();
+        if (this.config.auth) {
+          this.webServer.app.use((0, import_cookie_parser.default)());
+          this.webServer.app.use(import_body_parser.default.urlencoded({ extended: true }));
+          this.webServer.app.use(import_body_parser.default.json());
+          (0, import_webserver.createOAuth2Server)(this, {
+            app: this.webServer.app,
+            secure: this.config.secure,
+            accessLifetime: parseInt(this.config.ttl, 10) || 3600
+          });
+        }
+      } catch (err) {
+        this.log.error(`Cannot create webserver: ${err}`);
+        this.terminate ? this.terminate(import_adapter_core.EXIT_CODES.ADAPTER_REQUESTED_TERMINATION) : process.exit(import_adapter_core.EXIT_CODES.ADAPTER_REQUESTED_TERMINATION);
+        return;
+      }
+      if (!this.webServer.server) {
+        this.log.error(`Cannot create webserver`);
+        this.terminate ? this.terminate(import_adapter_core.EXIT_CODES.ADAPTER_REQUESTED_TERMINATION) : process.exit(import_adapter_core.EXIT_CODES.ADAPTER_REQUESTED_TERMINATION);
+        return;
+      }
+    } else {
+      this.log.error("port missing");
+      if (this.terminate) {
+        this.terminate(import_adapter_core.EXIT_CODES.ADAPTER_REQUESTED_TERMINATION);
+      } else {
+        process.exit(import_adapter_core.EXIT_CODES.ADAPTER_REQUESTED_TERMINATION);
+      }
+      return;
+    }
+    if (this.webServer.server) {
+      let serverListening = false;
+      let serverPort = this.config.port;
+      this.webServer.server.on("error", (e) => {
+        if (e.toString().includes("EACCES") && serverPort <= 1024) {
+          this.log.error(
+            `node.js process has no rights to start server on the port ${serverPort}.
+Do you know that on linux you need special permissions for ports under 1024?
+You can call in shell following scrip to allow it for node.js: "iobroker fix"`
+          );
+        } else {
+          this.log.error(`Cannot start server on ${this.config.bind || "0.0.0.0"}:${serverPort}: ${e}`);
+        }
+        if (!serverListening) {
+          this.terminate ? this.terminate(import_adapter_core.EXIT_CODES.ADAPTER_REQUESTED_TERMINATION) : process.exit(import_adapter_core.EXIT_CODES.ADAPTER_REQUESTED_TERMINATION);
+        }
+      });
+      this.webServer.app.use(async (req, res, _next) => {
+        var _a, _b, _c;
+        if (!this.browser) {
+          res.status(503).json({ error: "Browser not ready" });
+          return;
+        }
+        const { url } = req.query;
+        if (!url || typeof url !== "string") {
+          res.status(400).json({ error: "Missing required parameter: url" });
+          return;
+        }
+        try {
+          const screenshotOptions = {};
+          const viewport = {};
+          if (req.query.width) {
+            viewport.width = parseInt(req.query.width, 10);
+          }
+          if (req.query.height) {
+            viewport.height = parseInt(req.query.height, 10);
+          }
+          if (req.query.fullPage !== void 0) {
+            screenshotOptions.fullPage = req.query.fullPage === "true" || req.query.fullPage === "1";
+          }
+          if (!screenshotOptions.fullPage && req.query.clipTop !== void 0 && req.query.clipLeft !== void 0 && req.query.clipWidth !== void 0 && req.query.clipHeight !== void 0) {
+            screenshotOptions.clip = {
+              x: parseFloat(req.query.clipLeft),
+              y: parseFloat(req.query.clipTop),
+              width: parseFloat(req.query.clipWidth),
+              height: parseFloat(req.query.clipHeight)
+            };
+          }
+          if (req.query.quality !== void 0) {
+            screenshotOptions.quality = parseInt(req.query.quality, 10);
+          }
+          if (req.query.omitBackground !== void 0) {
+            screenshotOptions.omitBackground = req.query.omitBackground === "true" || req.query.omitBackground === "1";
+          }
+          const encoding = req.query.encoding === "base64" || req.query.encoding === "binary" ? req.query.encoding : "binary";
+          if (req.query.captureBeyondViewport !== void 0) {
+            screenshotOptions.captureBeyondViewport = req.query.captureBeyondViewport !== "false" && req.query.captureBeyondViewport !== "0";
+          }
+          const page = await this.browser.newPage();
+          const rawType = (_a = req.query.type) == null ? void 0 : _a.toLowerCase();
+          const screenshotType = rawType === "jpeg" || rawType === "jpg" ? "jpeg" : rawType === "webp" ? "webp" : "png";
+          screenshotOptions.type = screenshotType;
+          if (screenshotType === "png" && screenshotOptions.quality !== void 0) {
+            delete screenshotOptions.quality;
+          }
+          if (viewport.width || viewport.height) {
+            await page.setViewport({
+              width: (_b = viewport.width) != null ? _b : 1280,
+              height: (_c = viewport.height) != null ? _c : 720
+            });
+          }
+          await page.goto(url, { waitUntil: "networkidle2" });
+          const waitForSelector = req.query.waitForSelector;
+          const waitForTimeout = req.query.waitForTimeout ? parseInt(req.query.waitForTimeout, 10) : void 0;
+          if (waitForSelector) {
+            this.log.debug(`[web] Waiting for selector "${waitForSelector}"`);
+            await page.waitForSelector(waitForSelector);
+          } else if (waitForTimeout) {
+            this.log.debug(`[web] Waiting for timeout "${waitForTimeout}" ms`);
+            await this.delay(waitForTimeout);
+          }
+          this.log.info(`[web] Taking screenshot of "${url}"`);
+          const img = await page.screenshot(screenshotOptions);
+          await page.close();
+          if (encoding === "base64") {
+            const base64 = Buffer.from(img).toString("base64");
+            res.json({ result: base64 });
+          } else {
+            const mimeTypes = {
+              png: "image/png",
+              jpeg: "image/jpeg",
+              webp: "image/webp"
+            };
+            res.setHeader("Content-Type", mimeTypes[screenshotType]);
+            res.send(Buffer.from(img));
+          }
+        } catch (e) {
+          this.log.error(`[web] Could not take screenshot of "${url}": ${e.message}`);
+          res.status(500).json({ error: e.message });
+        }
+      });
+      this.getPort(
+        this.config.port,
+        !this.config.bind || this.config.bind === "0.0.0.0" ? void 0 : this.config.bind || void 0,
+        (port) => {
+          if (port !== this.config.port) {
+            this.log.error(`port ${this.config.port} already in use`);
+            if (this.terminate) {
+              this.terminate(1);
+            } else {
+              process.exit(1);
+            }
+            return;
+          }
+          serverPort = port;
+          if (this.webServer.server) {
+            this.webServer.server.listen(
+              port,
+              !this.config.bind || this.config.bind === "0.0.0.0" ? void 0 : this.config.bind || void 0,
+              () => serverListening = true
+            );
+            this.log.info(`http${this.config.secure ? "s" : ""} server listening on port ${port}`);
+          } else {
+            this.log.error("server initialization failed");
+            if (this.terminate) {
+              this.terminate(1);
+            } else {
+              process.exit(1);
+            }
+          }
+        }
+      );
+    }
   }
   /**
    * Extracts the waitOption from a message
