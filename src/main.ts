@@ -577,7 +577,7 @@ class PuppeteerAdapter extends utils.Adapter {
                         await this.delay(waitForTimeout);
                     }
 
-                    this.log.info(`[web] Taking screenshot of "${url}"`);
+                    this.log.debug(`[web] Taking screenshot of "${url}"`);
                     const img = await page.screenshot(screenshotOptions);
                     await page.close();
 
