@@ -77,6 +77,12 @@ declare global {
              * Required when `secure` is `true`.
              */
             certPublic?: string;
+
+            /**
+             * Maximum number of parallel renders (screenshots/pages active).
+             * 0 means unlimited (default). Used to save RAM.
+             */
+            maxParallelRenders?: number;
         }
     }
 }

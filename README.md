@@ -18,6 +18,19 @@ Headless browser to generate screenshots based on Chrome
 Puppeteer is a product of Google Inc. The developers of this module are in no way endorsed by or affiliated with Google Inc., 
 or any associated subsidiaries, logos or trademarks.
 
+## Headless environments
+Please note that on **headless systems** (like Linux servers without GUI) Chromium/Chrome require certain shared libraries to be available. The adapter installs many missing dependencies automatically via `osDependencies` on Linux, but depending on your distribution, you might still need to install a browser (e.g. `chromium-browser` or `google-chrome-stable`) manually and configure it via the **"Use external browser"** option.  
+If ioBroker is running as root (e.g. inside a Docker container), you might also need to pass the `--no-sandbox` and `--disable-setuid-sandbox` arguments inside the adapter settings.
+
+```bash
+sudo apt update
+sudo apt install chromium -y
+which chromium # check the path to the browser executable, e.g. /usr/bin/chromium
+chromium --version
+```
+
+And after that configure the adapter to use the installed browser by activating the **"Use external browser"** option and specifying the path to the browser executable (e.g. `/usr/bin/chromium`).
+
 ## How-To
 The adapter is fully configurable via states and does not provide settings in the admin interface.
 The states (besides `url`) will not get any ack-flag by the adapter and ack-flags are ignored in general.
@@ -46,7 +59,7 @@ other wait oeprations like `renderTime` are ignored.
 Interval in ms to wait till the page will be rendered
 
 ### Messages
-Alternatively you can take screenshots by sending messages to the adapter.
+Alternatively, you can take screenshots by sending messages to the adapter.
 All options beside from `url` and `ioBrokerOptions` are passed directly to the Puppeteer API, the currently supported parameters can be found
 below, for a more up-to-date version check the [API description](https://pptr.dev/api/puppeteer.screenshotoptions). 
 Additionally, you can define a `waitOption` to wait for a given time or for a selector. Finally, you can use the `ioBrokerOptions.storagePath` 
@@ -134,7 +147,7 @@ sendTo('puppeteer.0', 'screenshot', { url: 'https://www.google.com',
 ```
 
 ## Web server
-The adapter also provides a web server which allows to trigger screenshots by calling a link.
+The adapter also provides a web server which allows triggering screenshots by calling a link.
 The web server is active when the adapter is running and listens on port 10000 (configurable) by default.
 You can trigger a screenshot by calling `http://<ioBroker-IP>:10000?url=<URL>` where URL is the url you want to screenshot.
 You can also specify additional parameters:
@@ -149,7 +162,7 @@ You can also specify additional parameters:
 - `captureBeyondViewport=true` to allow taking screenshots bigger than the viewport (default is true)
 - `type=jpg/png` to specify the type of the screenshot (default is png)
 
-The response is the binary representation of the image which can be directly displayed in the browser or base64 string as `{ result: "base64" }` depending on the specified encoding.
+The response is the binary representation of the image that can be directly displayed in the browser or base64 string as `{ result: "base64" }` depending on the specified encoding.
 
 ## Changelog
 <!--
@@ -158,13 +171,14 @@ The response is the binary representation of the image which can be directly dis
 -->
 ### **WORK IN PROGRESS**
 * (@GermanBluefox) Allowed to make a screenshot by calling a link
+* (@GermanBluefox) Added the option to limit the simultaneous renders to avoid overload of the system
 
 ### 0.4.0 (2024-09-17)
 * (@foxriver76) updated puppeteer dependency
-* (@foxriver76) allow to specify an external browser for puppeteer
+* (@foxriver76) allowed specifying an external browser for puppeteer
 
 ### 0.3.0 (2024-05-19)
-* (foxriver76) allowed to specify additional arguments for the puppeteer process
+* (foxriver76) allowed specifying additional arguments for the puppeteer process
 * (foxriver76) updated puppeteer dependency
 
 ### 0.2.8 (2024-01-09)
@@ -174,13 +188,13 @@ The response is the binary representation of the image which can be directly dis
 * (foxriver76) update puppeteer dependency
 
 ### 0.2.6 (2022-08-14)
-* (foxriver76) we now close the page also when screenshot taken via message
+* (foxriver76) we now close the page also when a screenshot is taken via a message
 
 ### 0.2.5 (2022-08-14)
 * (foxriver76) we have optimized the viewport option
 
 ### 0.2.4 (2022-08-12)
-* (foxriver76) allow settings viewport options
+* (foxriver76) allowed settings viewport options
 * (foxriver76) the default viewport is now the max resolution
 
 ### 0.2.3 (2022-08-12)
@@ -190,7 +204,7 @@ The response is the binary representation of the image which can be directly dis
 * (foxriver76) we now install required shared libraries on adapter installation on linux
 
 ### 0.2.0 (2022-05-20)
-* (foxriver76) added option to save files to the ioBroker storage via messages by using `ioBrokerOptions.storagePath` (closes #2)
+* (foxriver76) added an option to save files to the ioBroker storage via messages by using `ioBrokerOptions.storagePath` (closes #2)
 
 ### 0.1.0 (2022-05-16)
 * (foxriver76) initial release

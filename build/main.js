@@ -33,6 +33,33 @@ var import_express = __toESM(require("express"));
 var import_cookie_parser = __toESM(require("cookie-parser"));
 var import_body_parser = __toESM(require("body-parser"));
 var import_adapter_core = require("@iobroker/adapter-core");
+class AsyncQueue {
+  constructor(maxConcurrent) {
+    this.queue = [];
+    this.activeCount = 0;
+    this.maxConcurrent = maxConcurrent;
+  }
+  async add(task) {
+    if (this.maxConcurrent === 0) {
+      return task();
+    }
+    if (this.activeCount >= this.maxConcurrent) {
+      await new Promise((resolve2) => this.queue.push(resolve2));
+    }
+    this.activeCount++;
+    try {
+      return await task();
+    } finally {
+      this.activeCount--;
+      if (this.queue.length > 0) {
+        const next = this.queue.shift();
+        if (next) {
+          next();
+        }
+      }
+    }
+  }
+}
 class PuppeteerAdapter extends utils.Adapter {
   constructor(options = {}) {
     super({ ...options, name: "puppeteer" });
@@ -50,6 +77,7 @@ class PuppeteerAdapter extends utils.Adapter {
    */
   async onReady() {
     let additionalArgs;
+    this.renderQueue = new AsyncQueue(this.config.maxParallelRenders || 0);
     if (this.config.secure) {
       await new Promise(
         (resolve2) => this.getCertificates(void 0, void 0, void 0, (_err, certificates) => {
@@ -75,7 +103,7 @@ class PuppeteerAdapter extends utils.Adapter {
     }
   }
   /**
-   * Is called when adapter shuts down - callback has to be called under any circumstances!
+   * Is called when the adapter shuts down - callback has to be called under any circumstances!
    *
    * @param callback callback which needs to be called
    */
@@ -100,7 +128,7 @@ class PuppeteerAdapter extends utils.Adapter {
     }
   }
   /**
-   * Is called when message received
+   * Is called when a message received
    *
    * @param obj the ioBroker message object
    */
@@ -127,21 +155,23 @@ class PuppeteerAdapter extends utils.Adapter {
         if (options.path) {
           this.validatePath(options.path);
         }
-        const page = await this.browser.newPage();
-        if (viewport) {
-          await page.setViewport(viewport);
-        }
-        await page.goto(url, { waitUntil: "networkidle2" });
-        if (waitMethod && waitMethod in page) {
-          await page[waitMethod](waitParameter);
-        }
-        const img = await page.screenshot(options);
-        if (storagePath) {
-          this.log.debug(`Write file to "${storagePath}"`);
-          await this.writeFileAsync("0_userdata.0", storagePath, Buffer.from(img));
-        }
-        await page.close();
-        this.sendTo(obj.from, obj.command, { result: img }, obj.callback);
+        await this.renderQueue.add(async () => {
+          const page = await this.browser.newPage();
+          if (viewport) {
+            await page.setViewport(viewport);
+          }
+          await page.goto(url, { waitUntil: "networkidle2" });
+          if (waitMethod && waitMethod in page) {
+            await page[waitMethod](waitParameter);
+          }
+          const img = await page.screenshot(options);
+          if (storagePath) {
+            this.log.debug(`Write file to "${storagePath}"`);
+            await this.writeFileAsync("0_userdata.0", storagePath, Buffer.from(img));
+          }
+          await page.close();
+          this.sendTo(obj.from, obj.command, { result: img }, obj.callback);
+        });
       } catch (e) {
         this.log.error(`Could not take screenshot of "${url}": ${e.message}`);
         this.sendTo(obj.from, obj.command, { error: e }, obj.callback);
@@ -181,13 +211,15 @@ class PuppeteerAdapter extends utils.Adapter {
       this.log.debug(`Screenshot options: ${JSON.stringify(options)}`);
       this.log.info(`Taking screenshot of "${state.val}"`);
       try {
-        const page = await this.browser.newPage();
-        await page.goto(state.val, { waitUntil: "networkidle2" });
-        await this.waitForConditions(page);
-        await page.screenshot(options);
-        this.log.info("Screenshot sucessfully saved");
-        await this.setStateAsync(id, state.val, true);
-        await page.close();
+        await this.renderQueue.add(async () => {
+          const page = await this.browser.newPage();
+          await page.goto(state.val, { waitUntil: "networkidle2" });
+          await this.waitForConditions(page);
+          await page.screenshot(options);
+          this.log.info("Screenshot sucessfully saved");
+          await this.setStateAsync(id, state.val, true);
+          await page.close();
+        });
       } catch (e) {
         this.log.error(`Could not take screenshot of "${state.val}": ${e.message}`);
       }
@@ -212,7 +244,7 @@ class PuppeteerAdapter extends utils.Adapter {
         options.clip = clipOptions;
       }
     } else {
-      this.log.debug("Ingoring clip options, because full page is desired");
+      this.log.debug("Ignoring clip options, because full page is desired");
     }
     return options;
   }
@@ -361,7 +393,6 @@ You can call in shell following scrip to allow it for node.js: "iobroker fix"`
         }
       });
       this.webServer.app.use(async (req, res, _next) => {
-        var _a, _b, _c;
         if (!this.browser) {
           res.status(503).json({ error: "Browser not ready" });
           return;
@@ -401,44 +432,43 @@ You can call in shell following scrip to allow it for node.js: "iobroker fix"`
           if (req.query.captureBeyondViewport !== void 0) {
             screenshotOptions.captureBeyondViewport = req.query.captureBeyondViewport !== "false" && req.query.captureBeyondViewport !== "0";
           }
-          const page = await this.browser.newPage();
-          const rawType = (_a = req.query.type) == null ? void 0 : _a.toLowerCase();
-          const screenshotType = rawType === "jpeg" || rawType === "jpg" ? "jpeg" : rawType === "webp" ? "webp" : "png";
-          screenshotOptions.type = screenshotType;
-          if (screenshotType === "png" && screenshotOptions.quality !== void 0) {
-            delete screenshotOptions.quality;
-          }
-          if (viewport.width || viewport.height) {
-            await page.setViewport({
-              width: (_b = viewport.width) != null ? _b : 1280,
-              height: (_c = viewport.height) != null ? _c : 720
-            });
-          }
-          await page.goto(url, { waitUntil: "networkidle2" });
-          const waitForSelector = req.query.waitForSelector;
-          const waitForTimeout = req.query.waitForTimeout ? parseInt(req.query.waitForTimeout, 10) : void 0;
-          if (waitForSelector) {
-            this.log.debug(`[web] Waiting for selector "${waitForSelector}"`);
-            await page.waitForSelector(waitForSelector);
-          } else if (waitForTimeout) {
-            this.log.debug(`[web] Waiting for timeout "${waitForTimeout}" ms`);
-            await this.delay(waitForTimeout);
-          }
-          this.log.info(`[web] Taking screenshot of "${url}"`);
-          const img = await page.screenshot(screenshotOptions);
-          await page.close();
-          if (encoding === "base64") {
-            const base64 = Buffer.from(img).toString("base64");
-            res.json({ result: base64 });
-          } else {
-            const mimeTypes = {
-              png: "image/png",
-              jpeg: "image/jpeg",
-              webp: "image/webp"
-            };
-            res.setHeader("Content-Type", mimeTypes[screenshotType]);
-            res.send(Buffer.from(img));
-          }
+          await this.renderQueue.add(async () => {
+            var _a, _b;
+            const page = await this.browser.newPage();
+            const type = req.query.type || "png";
+            if (type === "jpeg" || type === "jpg") {
+              screenshotOptions.type = "jpeg";
+            } else if (type === "webp") {
+              screenshotOptions.type = "webp";
+            }
+            if (viewport.width || viewport.height) {
+              await page.setViewport({
+                width: (_a = viewport.width) != null ? _a : 1280,
+                height: (_b = viewport.height) != null ? _b : 720
+              });
+            }
+            await page.goto(url, { waitUntil: "networkidle2" });
+            const waitForSelector = req.query.waitForSelector;
+            const waitForTimeout = req.query.waitForTimeout ? parseInt(req.query.waitForTimeout, 10) : void 0;
+            if (waitForSelector) {
+              this.log.debug(`[web] Waiting for selector "${waitForSelector}"`);
+              await page.waitForSelector(waitForSelector);
+            } else if (waitForTimeout) {
+              this.log.debug(`[web] Waiting for timeout "${waitForTimeout}" ms`);
+              await this.delay(waitForTimeout);
+            }
+            this.log.info(`[web] Taking screenshot of "${url}"`);
+            const img = await page.screenshot(screenshotOptions);
+            await page.close();
+            if (encoding === "base64") {
+              const base64 = Buffer.from(img).toString("base64");
+              res.json({ result: base64 });
+            } else {
+              const mimeType = screenshotOptions.type === "jpeg" ? "image/jpeg" : screenshotOptions.type === "webp" ? "image/webp" : "image/png";
+              res.setHeader("Content-Type", mimeType);
+              res.send(Buffer.from(img));
+            }
+          });
         } catch (e) {
           this.log.error(`[web] Could not take screenshot of "${url}": ${e.message}`);
           res.status(500).json({ error: e.message });

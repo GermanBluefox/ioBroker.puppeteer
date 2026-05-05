@@ -18,8 +18,42 @@ interface WebStructure {
     app: Express | null;
 }
 
+class AsyncQueue {
+    private queue: (() => void)[] = [];
+    private activeCount = 0;
+    private readonly maxConcurrent: number;
+
+    constructor(maxConcurrent: number) {
+        this.maxConcurrent = maxConcurrent;
+    }
+
+    public async add<T>(task: () => Promise<T>): Promise<T> {
+        if (this.maxConcurrent === 0) {
+            return task(); // No limit
+        }
+
+        if (this.activeCount >= this.maxConcurrent) {
+            await new Promise<void>(resolve => this.queue.push(resolve));
+        }
+
+        this.activeCount++;
+        try {
+            return await task();
+        } finally {
+            this.activeCount--;
+            if (this.queue.length > 0) {
+                const next = this.queue.shift();
+                if (next) {
+                    next();
+                }
+            }
+        }
+    }
+}
+
 class PuppeteerAdapter extends utils.Adapter {
     private browser: Browser | undefined;
+    private renderQueue: AsyncQueue | undefined;
 
     private certificates: ioBroker.Certificates | undefined;
 
@@ -42,6 +76,8 @@ class PuppeteerAdapter extends utils.Adapter {
      */
     private async onReady(): Promise<void> {
         let additionalArgs: string[] | undefined;
+
+        this.renderQueue = new AsyncQueue(this.config.maxParallelRenders || 0);
 
         if (this.config.secure) {
             // Load certificates
@@ -74,7 +110,7 @@ class PuppeteerAdapter extends utils.Adapter {
     }
 
     /**
-     * Is called when adapter shuts down - callback has to be called under any circumstances!
+     * Is called when the adapter shuts down - callback has to be called under any circumstances!
      *
      * @param callback callback which needs to be called
      */
@@ -102,7 +138,7 @@ class PuppeteerAdapter extends utils.Adapter {
     }
 
     /**
-     * Is called when message received
+     * Is called when a message received
      *
      * @param obj the ioBroker message object
      */
@@ -136,27 +172,29 @@ class PuppeteerAdapter extends utils.Adapter {
                     this.validatePath(options.path);
                 }
 
-                const page = await this.browser.newPage();
+                await this.renderQueue!.add(async () => {
+                    const page = await this.browser!.newPage();
 
-                if (viewport) {
-                    await page.setViewport(viewport);
-                }
+                    if (viewport) {
+                        await page.setViewport(viewport);
+                    }
 
-                await page.goto(url, { waitUntil: 'networkidle2' });
+                    await page.goto(url, { waitUntil: 'networkidle2' });
 
-                // if wait options given, await them
-                if (waitMethod && waitMethod in page) {
-                    await (page as any)[waitMethod](waitParameter);
-                }
+                    // if wait options given, await them
+                    if (waitMethod && waitMethod in page) {
+                        await (page as any)[waitMethod](waitParameter);
+                    }
 
-                const img = await page.screenshot(options);
-                if (storagePath) {
-                    this.log.debug(`Write file to "${storagePath}"`);
-                    await this.writeFileAsync('0_userdata.0', storagePath, Buffer.from(img));
-                }
+                    const img = await page.screenshot(options);
+                    if (storagePath) {
+                        this.log.debug(`Write file to "${storagePath}"`);
+                        await this.writeFileAsync('0_userdata.0', storagePath, Buffer.from(img));
+                    }
 
-                await page.close();
-                this.sendTo(obj.from, obj.command, { result: img }, obj.callback);
+                    await page.close();
+                    this.sendTo(obj.from, obj.command, { result: img }, obj.callback);
+                });
             } catch (e) {
                 this.log.error(`Could not take screenshot of "${url}": ${e.message}`);
                 this.sendTo(obj.from, obj.command, { error: e }, obj.callback);
@@ -204,17 +242,19 @@ class PuppeteerAdapter extends utils.Adapter {
             this.log.info(`Taking screenshot of "${state.val}"`);
 
             try {
-                const page = await this.browser.newPage();
-                await page.goto(state.val as string, { waitUntil: 'networkidle2' });
+                await this.renderQueue!.add(async () => {
+                    const page = await this.browser!.newPage();
+                    await page.goto(state.val as string, { waitUntil: 'networkidle2' });
 
-                await this.waitForConditions(page);
+                    await this.waitForConditions(page);
 
-                await page.screenshot(options);
+                    await page.screenshot(options);
 
-                // set ack true, to inform about screenshot creation
-                this.log.info('Screenshot sucessfully saved');
-                await this.setStateAsync(id, state.val, true);
-                await page.close();
+                    // set ack true to inform about screenshot creation
+                    this.log.info('Screenshot sucessfully saved');
+                    await this.setStateAsync(id, state.val, true);
+                    await page.close();
+                });
             } catch (e) {
                 this.log.error(`Could not take screenshot of "${state.val}": ${e.message}`);
             }
@@ -246,7 +286,7 @@ class PuppeteerAdapter extends utils.Adapter {
                 options.clip = clipOptions;
             }
         } else {
-            this.log.debug('Ingoring clip options, because full page is desired');
+            this.log.debug('Ignoring clip options, because full page is desired');
         }
 
         return options;
@@ -479,7 +519,7 @@ class PuppeteerAdapter extends utils.Adapter {
                     }
 
                     // -- fullPage --
-                    // When true the screenshot covers the entire scrollable document height, not just the visible viewport.
+                    // When true, the screenshot covers the entire scrollable document height, not just the visible viewport.
                     if (req.query.fullPage !== undefined) {
                         screenshotOptions.fullPage = req.query.fullPage === 'true' || req.query.fullPage === '1';
                     }
@@ -510,7 +550,7 @@ class PuppeteerAdapter extends utils.Adapter {
                     }
 
                     // -- omitBackground --
-                    // When true the default white page background is replaced with transparency.
+                    // When true, the default white page background is replaced with transparency.
                     // Only effective for PNG output; JPEG does not support an alpha channel.
                     if (req.query.omitBackground !== undefined) {
                         screenshotOptions.omitBackground =
@@ -527,72 +567,69 @@ class PuppeteerAdapter extends utils.Adapter {
                             : 'binary';
 
                     // -- captureBeyondViewport --
-                    // When false Puppeteer restricts the screenshot to the configured viewport area.
+                    // When false, Puppeteer restricts the screenshot to the configured viewport area.
                     // Defaults to true so that content rendered outside the viewport is still captured.
                     if (req.query.captureBeyondViewport !== undefined) {
                         screenshotOptions.captureBeyondViewport =
                             req.query.captureBeyondViewport !== 'false' && req.query.captureBeyondViewport !== '0';
                     }
 
-                    const page = await this.browser.newPage();
+                    await this.renderQueue!.add(async () => {
+                        const page = await this.browser!.newPage();
 
-                    // -- type --
-                    // Determines the image format of the screenshot.
-                    // Accepted values: "png" (default, lossless), "jpeg" (lossy, smaller files), "webp" (lossy, modern format).
-                    // "jpeg" and "webp" honour the `quality` parameter; "png" ignores it.
-                    const rawType = (req.query.type as string | undefined)?.toLowerCase();
-                    const screenshotType: 'png' | 'jpeg' | 'webp' =
-                        rawType === 'jpeg' || rawType === 'jpg' ? 'jpeg' : rawType === 'webp' ? 'webp' : 'png';
-                    (screenshotOptions as any).type = screenshotType;
+                        const type = req.query.type || 'png';
 
-                    // quality is only meaningful for jpeg and webp
-                    if (screenshotType === 'png' && (screenshotOptions as any).quality !== undefined) {
-                        delete (screenshotOptions as any).quality;
-                    }
+                        if (type === 'jpeg' || type === 'jpg') {
+                            (screenshotOptions as any).type = 'jpeg';
+                        } else if (type === 'webp') {
+                            (screenshotOptions as any).type = 'webp';
+                        }
 
-                    // Apply viewport if width or height provided.
-                    // Falls back to 1280×720 when only one dimension is given.
-                    if (viewport.width || viewport.height) {
-                        await page.setViewport({
-                            width: viewport.width ?? 1280,
-                            height: viewport.height ?? 720
-                        });
-                    }
+                        // Apply viewport if width or height provided.
+                        // Falls back to 1280×720 when only one dimension is given.
+                        if (viewport.width || viewport.height) {
+                            await page.setViewport({
+                                width: viewport.width ?? 1280,
+                                height: viewport.height ?? 720
+                            });
+                        }
 
-                    await page.goto(url, { waitUntil: 'networkidle2' });
+                        await page.goto(url, { waitUntil: 'networkidle2' });
 
-                    // -- waitForSelector / waitForTimeout --
-                    // waitForSelector takes priority: Puppeteer blocks until the CSS element appears in the DOM.
-                    // If no selector is given, waitForTimeout introduces a plain millisecond delay instead.
-                    const waitForSelector = req.query.waitForSelector as string | undefined;
-                    const waitForTimeout = req.query.waitForTimeout
-                        ? parseInt(req.query.waitForTimeout as string, 10)
-                        : undefined;
+                        // -- waitForSelector / waitForTimeout --
+                        // waitForSelector takes priority: Puppeteer blocks until the CSS element appears in the DOM.
+                        // If no selector is given, waitForTimeout introduces a plain millisecond delay instead.
+                        const waitForSelector = req.query.waitForSelector as string | undefined;
+                        const waitForTimeout = req.query.waitForTimeout
+                            ? parseInt(req.query.waitForTimeout as string, 10)
+                            : undefined;
 
-                    if (waitForSelector) {
-                        this.log.debug(`[web] Waiting for selector "${waitForSelector}"`);
-                        await page.waitForSelector(waitForSelector);
-                    } else if (waitForTimeout) {
-                        this.log.debug(`[web] Waiting for timeout "${waitForTimeout}" ms`);
-                        await this.delay(waitForTimeout);
-                    }
+                        if (waitForSelector) {
+                            this.log.debug(`[web] Waiting for selector "${waitForSelector}"`);
+                            await page.waitForSelector(waitForSelector);
+                        } else if (waitForTimeout) {
+                            this.log.debug(`[web] Waiting for timeout "${waitForTimeout}" ms`);
+                            await this.delay(waitForTimeout);
+                        }
 
-                    this.log.debug(`[web] Taking screenshot of "${url}"`);
-                    const img = await page.screenshot(screenshotOptions);
-                    await page.close();
+                        this.log.info(`[web] Taking screenshot of "${url}"`);
+                        const img = await page.screenshot(screenshotOptions);
+                        await page.close();
 
-                    if (encoding === 'base64') {
-                        const base64 = Buffer.from(img).toString('base64');
-                        res.json({ result: base64 });
-                    } else {
-                        const mimeTypes: Record<'png' | 'jpeg' | 'webp', string> = {
-                            png: 'image/png',
-                            jpeg: 'image/jpeg',
-                            webp: 'image/webp'
-                        };
-                        res.setHeader('Content-Type', mimeTypes[screenshotType]);
-                        res.send(Buffer.from(img));
-                    }
+                        if (encoding === 'base64') {
+                            const base64 = Buffer.from(img).toString('base64');
+                            res.json({ result: base64 });
+                        } else {
+                            const mimeType =
+                                (screenshotOptions as any).type === 'jpeg'
+                                    ? 'image/jpeg'
+                                    : (screenshotOptions as any).type === 'webp'
+                                      ? 'image/webp'
+                                      : 'image/png';
+                            res.setHeader('Content-Type', mimeType);
+                            res.send(Buffer.from(img));
+                        }
+                    });
                 } catch (e: any) {
                     this.log.error(`[web] Could not take screenshot of "${url}": ${e.message}`);
                     res.status(500).json({ error: e.message });
