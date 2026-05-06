@@ -136,6 +136,21 @@ sendTo('puppeteer.0', 'screenshot', { url: 'https://www.google.com',
        * @defaultValue true
        */
       captureBeyondViewport?: boolean,
+      /**
+       * When the navigation is considered finished. Defaults to `networkidle2` for backwards compatibility,
+       * but for pages with persistent connections (WebSockets, SSE) — e.g. ioBroker vis, Home Assistant
+       * Lovelace, Grafana — `networkidle2` will never trigger and the screenshot will only be taken once
+       * `navigationTimeout` is reached. Use `'load'` or `'domcontentloaded'` for those pages and combine
+       * with `waitOption.waitForSelector` to wait for a real "ready" marker.
+       * @defaultValue 'networkidle2'
+       */
+      waitUntil?: 'load' | 'domcontentloaded' | 'networkidle0' | 'networkidle2',
+      /**
+       * Maximum time in milliseconds for `page.goto()` and any subsequent `waitFor…` calls.
+       * Lower values free up the renderer process faster when a page hangs.
+       * @defaultValue 30000
+       */
+      navigationTimeout?: number,
   }, obj => {
       if (obj.error) {
         log(`Error taking screenshot: ${obj.error.message}`, 'error');
@@ -161,8 +176,35 @@ You can also specify additional parameters:
 - `encoding=base64` to specify the encoding of the image (default is binary)
 - `captureBeyondViewport=true` to allow taking screenshots bigger than the viewport (default is true)
 - `type=jpg/png` to specify the type of the screenshot (default is png)
+- `waitUntil=load|domcontentloaded|networkidle0|networkidle2` controls when navigation is considered finished (default: `networkidle2`). See **Tips for live-data dashboards** below.
+- `navigationTimeout=15000` maximum time in ms for `page.goto()` and subsequent waits (default: `30000`). Lower values free up renderer processes faster when a page hangs.
 
 The response is the binary representation of the image that can be directly displayed in the browser or base64 string as `{ result: "base64" }` depending on the specified encoding.
+
+### Tips for live-data dashboards (vis / vis-2 / Lovelace / Grafana)
+The default `waitUntil=networkidle2` waits until the page has fewer than three open network connections for 500 ms. Dashboards that hold a permanent WebSocket or Server-Sent-Events connection — including **ioBroker vis / vis-2**, **Home Assistant Lovelace** and **Grafana** — never reach that state, so every screenshot will block until `navigationTimeout` (default 30 s) elapses. While the page hangs, its Chromium renderer process keeps eating ~100–200 MB RSS.
+
+For these dashboards use:
+
+- `waitUntil=load` (or `domcontentloaded`) — does **not** wait for WebSockets to go idle, and
+- `waitForSelector=<a-selector-that-only-exists-once-the-data-is-rendered>` — to make sure you actually capture rendered content, not an empty skeleton.
+
+Suggested ready selectors:
+
+| Dashboard | Selector |
+|-----------|----------|
+| ioBroker vis 1 | `#vis_container .vis-view` |
+| ioBroker vis-2 | `#materialUI` |
+| Home Assistant Lovelace | `home-assistant-main` (and optionally `hui-view ha-card` once cards have rendered) |
+| Grafana | `.panel-content` or `.dashboard-container` |
+
+Optional: append a small `waitForTimeout` (e.g. `200`) for chart animations to settle.
+
+Example:
+
+```
+http://<ioBroker-IP>:10000?url=http://homeassistant.local:8123/lovelace/0&waitUntil=load&waitForSelector=hui-view&waitForTimeout=300
+```
 
 ## Changelog
 <!--
@@ -172,6 +214,8 @@ The response is the binary representation of the image that can be directly disp
 ### **WORK IN PROGRESS**
 * (@GermanBluefox) Allowed to make a screenshot by calling a link
 * (@GermanBluefox) Added the option to limit the simultaneous renders to avoid overload of the system
+* (@GermanBluefox) Fixed renderer-process leak when navigation or screenshot threw — pages are now always closed
+* (@GermanBluefox) Added per-request `waitUntil` and `navigationTimeout` parameters (message API + web server) to support live-data dashboards (vis, Lovelace, Grafana) without hitting the network-idle timeout
 
 ### 0.4.0 (2024-09-17)
 * (@foxriver76) updated puppeteer dependency

@@ -1,5 +1,5 @@
 import * as utils from '@iobroker/adapter-core';
-import type { Page, Browser, ScreenshotOptions, ScreenshotClip, Viewport } from 'puppeteer';
+import type { Page, Browser, ScreenshotOptions, ScreenshotClip, Viewport, PuppeteerLifeCycleEvent } from 'puppeteer';
 import puppeteer from 'puppeteer';
 import { isObject } from './lib/tools';
 import { normalize, resolve, sep as pathSeparator } from 'node:path';
@@ -10,6 +10,10 @@ import type { Server as HttpsServer } from 'node:https';
 import cookieParser from 'cookie-parser';
 import bodyParser from 'body-parser';
 import { EXIT_CODES } from '@iobroker/adapter-core';
+
+const VALID_WAIT_UNTIL = ['load', 'domcontentloaded', 'networkidle0', 'networkidle2'] as const;
+const DEFAULT_WAIT_UNTIL: PuppeteerLifeCycleEvent = 'networkidle2';
+const DEFAULT_NAVIGATION_TIMEOUT_MS = 30_000;
 
 export type Server = HttpServer | HttpsServer;
 
@@ -166,6 +170,11 @@ class PuppeteerAdapter extends utils.Adapter {
             const { waitMethod, waitParameter } = PuppeteerAdapter.extractWaitOptionFromMessage(options);
             const { storagePath } = PuppeteerAdapter.extractIoBrokerOptionsFromMessage(options);
             const viewport = PuppeteerAdapter.extractViewportOptionsFromMessage(options);
+            const waitUntil = PuppeteerAdapter.parseWaitUntil(options.waitUntil) ?? DEFAULT_WAIT_UNTIL;
+            const navigationTimeout =
+                PuppeteerAdapter.parseNavigationTimeout(options.navigationTimeout) ?? DEFAULT_NAVIGATION_TIMEOUT_MS;
+            delete options.waitUntil;
+            delete options.navigationTimeout;
 
             try {
                 if (options.path) {
@@ -173,26 +182,35 @@ class PuppeteerAdapter extends utils.Adapter {
                 }
 
                 await this.renderQueue!.add(async () => {
-                    const page = await this.browser!.newPage();
+                    let page: Page | undefined;
+                    let img: Buffer<ArrayBufferLike> | undefined;
+                    try {
+                        page = await this.browser!.newPage();
+                        // Bound subsequent ops (waitForSelector, screenshot, …) so they cannot hang forever.
+                        page.setDefaultTimeout(navigationTimeout);
 
-                    if (viewport) {
-                        await page.setViewport(viewport);
+                        if (viewport) {
+                            await page.setViewport(viewport);
+                        }
+
+                        await page.goto(url, { waitUntil, timeout: navigationTimeout });
+
+                        // if wait options given, await them
+                        if (waitMethod && waitMethod in page) {
+                            await (page as any)[waitMethod](waitParameter);
+                        }
+
+                        img = await page.screenshot(options);
+                        if (storagePath) {
+                            this.log.debug(`Write file to "${storagePath}"`);
+                            await this.writeFileAsync('0_userdata.0', storagePath, Buffer.from(img));
+                        }
+                    } catch (e) {
+                        this.log.error(`Could not take screenshot of "${url}": ${e.message}`);
+                    } finally {
+                        await PuppeteerAdapter.safeClosePage(page);
                     }
 
-                    await page.goto(url, { waitUntil: 'networkidle2' });
-
-                    // if wait options given, await them
-                    if (waitMethod && waitMethod in page) {
-                        await (page as any)[waitMethod](waitParameter);
-                    }
-
-                    const img = await page.screenshot(options);
-                    if (storagePath) {
-                        this.log.debug(`Write file to "${storagePath}"`);
-                        await this.writeFileAsync('0_userdata.0', storagePath, Buffer.from(img));
-                    }
-
-                    await page.close();
                     this.sendTo(obj.from, obj.command, { result: img }, obj.callback);
                 });
             } catch (e) {
@@ -223,7 +241,7 @@ class PuppeteerAdapter extends utils.Adapter {
         }
 
         // user wants to perform a screenshot
-        if (state && state.val && !state.ack) {
+        if (state?.val && !state.ack) {
             const options: ScreenshotOptions = await this.gatherScreenshotOptions();
 
             if (!options.path) {
@@ -243,17 +261,23 @@ class PuppeteerAdapter extends utils.Adapter {
 
             try {
                 await this.renderQueue!.add(async () => {
-                    const page = await this.browser!.newPage();
-                    await page.goto(state.val as string, { waitUntil: 'networkidle2' });
+                    let page: Page | undefined;
+                    try {
+                        page = await this.browser!.newPage();
+                        await page.goto(state.val as string, { waitUntil: DEFAULT_WAIT_UNTIL });
 
-                    await this.waitForConditions(page);
+                        await this.waitForConditions(page);
 
-                    await page.screenshot(options);
+                        await page.screenshot(options);
 
-                    // set ack true to inform about screenshot creation
-                    this.log.info('Screenshot sucessfully saved');
-                    await this.setStateAsync(id, state.val, true);
-                    await page.close();
+                        // set ack true to inform about screenshot creation
+                        this.log.info('Screenshot successfully saved');
+                        await this.setStateAsync(id, state.val, true);
+                    } catch (e) {
+                        this.log.error(`Could not take screenshot of "${state.val}": ${e.message}`);
+                    } finally {
+                        await PuppeteerAdapter.safeClosePage(page);
+                    }
                 });
             } catch (e) {
                 this.log.error(`Could not take screenshot of "${state.val}": ${e.message}`);
@@ -355,6 +379,52 @@ class PuppeteerAdapter extends utils.Adapter {
             this.log.debug(`Waiting for timeout "${renderTimeMs}" ms`);
             await this.delay(renderTimeMs);
             return;
+        }
+    }
+
+    /**
+     * Parses a candidate `waitUntil` value (from query string or message) and returns
+     * a valid `PuppeteerLifeCycleEvent`, or `undefined` if the value is missing/invalid.
+     *
+     * @param value raw value as provided by the caller
+     */
+    private static parseWaitUntil(value: unknown): PuppeteerLifeCycleEvent | undefined {
+        if (typeof value !== 'string') {
+            return undefined;
+        }
+        return (VALID_WAIT_UNTIL as readonly string[]).includes(value)
+            ? (value as PuppeteerLifeCycleEvent)
+            : undefined;
+    }
+
+    /**
+     * Parses a candidate `navigationTimeout` value (ms) from query string or message.
+     * Accepts numbers or numeric strings; returns `undefined` for missing/non-positive input.
+     *
+     * @param value raw value as provided by the caller
+     */
+    private static parseNavigationTimeout(value: unknown): number | undefined {
+        const parsed = typeof value === 'number' ? value : typeof value === 'string' ? parseInt(value, 10) : NaN;
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+    }
+
+    /**
+     * Closes a page and swallows any errors.
+     *
+     * Why: page.close() can reject when the renderer or browser is already gone (e.g. after an OOM kill
+     * or a navigation crash). A throw here would bubble out of the finally block and skip the caller's
+     * own error handling, which is exactly what previously caused renderer processes to leak.
+     *
+     * @param page page to close (maybe undefined if newPage() itself failed)
+     */
+    private static async safeClosePage(page: Page | undefined): Promise<void> {
+        if (!page) {
+            return;
+        }
+        try {
+            await page.close();
+        } catch {
+            // ignore — the renderer is gone or already closing
         }
     }
 
@@ -491,6 +561,8 @@ class PuppeteerAdapter extends utils.Adapter {
              * @param req.query.waitForSelector {string} CSS selector to wait for before taking the screenshot (e.g. "#loaded"). Takes priority over waitForTimeout.
              * @param req.query.type {"png"|"jpeg"|"webp"} Image format of the screenshot (default: "png"). Use "jpeg" or "webp" together with `quality` for lossy compression.
              * @param req.query.waitForTimeout {number} Milliseconds to wait after page load before taking the screenshot. Only used if waitForSelector is not set.
+             * @param req.query.waitUntil {"load"|"domcontentloaded"|"networkidle0"|"networkidle2"} When the navigation is considered finished (default: "networkidle2"). Use "load" or "domcontentloaded" for pages with persistent connections (WebSockets, Server-Sent Events) that never reach network idle — e.g. ioBroker vis/vis-2, Home Assistant Lovelace, Grafana — and combine with `waitForSelector` to wait for a "ready" element instead.
+             * @param req.query.navigationTimeout {number} Maximum time in milliseconds for `page.goto()` and subsequent waits (default: 30000). Lower values free up renderer processes faster when a page hangs.
              */
             this.webServer.app.use(async (req: Request, res: Response, _next: NextFunction) => {
                 if (!this.browser) {
@@ -574,65 +646,78 @@ class PuppeteerAdapter extends utils.Adapter {
                             req.query.captureBeyondViewport !== 'false' && req.query.captureBeyondViewport !== '0';
                     }
 
+                    const waitUntil = PuppeteerAdapter.parseWaitUntil(req.query.waitUntil) ?? DEFAULT_WAIT_UNTIL;
+                    const navigationTimeout =
+                        PuppeteerAdapter.parseNavigationTimeout(req.query.navigationTimeout) ??
+                        DEFAULT_NAVIGATION_TIMEOUT_MS;
+
                     await this.renderQueue!.add(async () => {
-                        const page = await this.browser!.newPage();
+                        let page: Page | undefined;
+                        try {
+                            page = await this.browser!.newPage();
+                            // Bound subsequent ops (waitForSelector, screenshot, …) so they cannot hang forever.
+                            page.setDefaultTimeout(navigationTimeout);
 
-                        const type = req.query.type || 'png';
+                            const type = req.query.type || 'png';
 
-                        if (type === 'jpeg' || type === 'jpg') {
-                            (screenshotOptions as any).type = 'jpeg';
-                        } else if (type === 'webp') {
-                            (screenshotOptions as any).type = 'webp';
-                        }
+                            if (type === 'jpeg' || type === 'jpg') {
+                                (screenshotOptions as any).type = 'jpeg';
+                            } else if (type === 'webp') {
+                                (screenshotOptions as any).type = 'webp';
+                            }
 
-                        // Apply viewport if width or height provided.
-                        // Falls back to 1280×720 when only one dimension is given.
-                        if (viewport.width || viewport.height) {
-                            await page.setViewport({
-                                width: viewport.width ?? 1280,
-                                height: viewport.height ?? 720
-                            });
-                        }
+                            // Apply viewport if width or height provided.
+                            // Falls back to 1280×720 when only one dimension is given.
+                            if (viewport.width || viewport.height) {
+                                await page.setViewport({
+                                    width: viewport.width ?? 1280,
+                                    height: viewport.height ?? 720
+                                });
+                            }
 
-                        await page.goto(url, { waitUntil: 'networkidle2' });
+                            await page.goto(url, { waitUntil, timeout: navigationTimeout });
 
-                        // -- waitForSelector / waitForTimeout --
-                        // waitForSelector takes priority: Puppeteer blocks until the CSS element appears in the DOM.
-                        // If no selector is given, waitForTimeout introduces a plain millisecond delay instead.
-                        const waitForSelector = req.query.waitForSelector as string | undefined;
-                        const waitForTimeout = req.query.waitForTimeout
-                            ? parseInt(req.query.waitForTimeout as string, 10)
-                            : undefined;
+                            // -- waitForSelector / waitForTimeout --
+                            // waitForSelector takes priority: Puppeteer blocks until the CSS element appears in the DOM.
+                            // If no selector is given, waitForTimeout introduces a plain millisecond delay instead.
+                            const waitForSelector = req.query.waitForSelector as string | undefined;
+                            const waitForTimeout = req.query.waitForTimeout
+                                ? parseInt(req.query.waitForTimeout as string, 10)
+                                : undefined;
 
-                        if (waitForSelector) {
-                            this.log.debug(`[web] Waiting for selector "${waitForSelector}"`);
-                            await page.waitForSelector(waitForSelector);
-                        } else if (waitForTimeout) {
-                            this.log.debug(`[web] Waiting for timeout "${waitForTimeout}" ms`);
-                            await this.delay(waitForTimeout);
-                        }
+                            if (waitForSelector) {
+                                this.log.debug(`[web] Waiting for selector "${waitForSelector}"`);
+                                await page.waitForSelector(waitForSelector);
+                            } else if (waitForTimeout) {
+                                this.log.debug(`[web] Waiting for timeout "${waitForTimeout}" ms`);
+                                await this.delay(waitForTimeout);
+                            }
 
-                        this.log.info(`[web] Taking screenshot of "${url}"`);
-                        const img = await page.screenshot(screenshotOptions);
-                        await page.close();
+                            this.log.info(`[web] Taking screenshot of "${url}"`);
+                            const img = await page.screenshot(screenshotOptions);
 
-                        if (encoding === 'base64') {
-                            const base64 = Buffer.from(img).toString('base64');
-                            res.json({ result: base64 });
-                        } else {
-                            const mimeType =
-                                (screenshotOptions as any).type === 'jpeg'
-                                    ? 'image/jpeg'
-                                    : (screenshotOptions as any).type === 'webp'
-                                      ? 'image/webp'
-                                      : 'image/png';
-                            res.setHeader('Content-Type', mimeType);
-                            res.send(Buffer.from(img));
+                            if (encoding === 'base64') {
+                                const base64 = Buffer.from(img).toString('base64');
+                                res.json({ result: base64 });
+                            } else {
+                                const mimeType =
+                                    (screenshotOptions as any).type === 'jpeg'
+                                        ? 'image/jpeg'
+                                        : (screenshotOptions as any).type === 'webp'
+                                          ? 'image/webp'
+                                          : 'image/png';
+                                res.setHeader('Content-Type', mimeType);
+                                res.send(Buffer.from(img));
+                            }
+                        } finally {
+                            await PuppeteerAdapter.safeClosePage(page);
                         }
                     });
                 } catch (e: any) {
                     this.log.error(`[web] Could not take screenshot of "${url}": ${e.message}`);
-                    res.status(500).json({ error: e.message });
+                    if (!res.headersSent) {
+                        res.status(500).json({ error: e.message });
+                    }
                 }
             });
 
