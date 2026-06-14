@@ -23,62 +23,6 @@ declare global {
             executablePath: string;
 
             /**
-             * When `true`, the adapter starts an HTTP(S) web server that accepts
-             * screenshot requests via `GET /screenshot?url=...`.
-             * Requires `port` to be configured.
-             */
-            allowWebAccess?: boolean;
-
-            /**
-             * TCP port on which the web server listens (default: `10000`).
-             * Only used when `allowWebAccess` is `true`.
-             */
-            port?: number | string;
-
-            /**
-             * When `true`, the web server uses HTTPS instead of HTTP.
-             * Certificates must be provided via `certPublic`, `certPrivate` and optionally `certChained`.
-             */
-            secure?: boolean;
-
-            /**
-             * When `true`, incoming web requests must be authenticated via OAuth2
-             * before a screenshot can be requested.
-             */
-            auth?: boolean;
-
-            /**
-             * Lifetime of an OAuth2 access token in seconds (default: `3600`).
-             * Only relevant when `auth` is `true`.
-             */
-            ttl?: number | string;
-
-            /**
-             * IP address or hostname the web server binds to.
-             * Use `0.0.0.0` (default) to listen on all network interfaces,
-             * or a specific address to restrict access to one interface.
-             */
-            bind?: string;
-
-            /**
-             * PEM-encoded certificate chain / intermediate CA bundle.
-             * Used when `secure` is `true` and the CA is not well-known.
-             */
-            certChained?: string;
-
-            /**
-             * PEM-encoded private key matching the TLS certificate.
-             * Required when `secure` is `true`.
-             */
-            certPrivate?: string;
-
-            /**
-             * PEM-encoded public TLS certificate presented to HTTPS clients.
-             * Required when `secure` is `true`.
-             */
-            certPublic?: string;
-
-            /**
              * Maximum number of parallel renders (screenshots/pages active).
              * 0 means unlimited (default). Used to save RAM.
              */
@@ -87,5 +31,5 @@ declare global {
     }
 }
 
-// this is required so the above AdapterConfig is found by TypeScript / type checking
+// this is required, so the above AdapterConfig is found by TypeScript / type checking
 export {};

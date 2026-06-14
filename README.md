@@ -212,7 +212,6 @@ http://<ioBroker-IP>:10000?url=http://homeassistant.local:8123/lovelace/0&waitUn
     ### **WORK IN PROGRESS**
 -->
 ### **WORK IN PROGRESS**
-* (@GermanBluefox) Allowed to make a screenshot by calling a link
 * (@GermanBluefox) Added the option to limit the simultaneous renders to avoid overload of the system
 * (@GermanBluefox) Fixed renderer-process leak when navigation or screenshot threw — pages are now always closed
 * (@GermanBluefox) Added per-request `waitUntil` and `navigationTimeout` parameters (message API + web server) to support live-data dashboards (vis, Lovelace, Grafana) without hitting the network-idle timeout
