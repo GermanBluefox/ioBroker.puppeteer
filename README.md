@@ -161,7 +161,7 @@ sendTo('puppeteer.0', 'screenshot', { url: 'https://www.google.com',
 });
 ```
 
-## Web server
+## Get answer via GET/POST request
 You can use the `rest-api` adapter to get the response for sendTo operations via http:
 ```bash
 curl -X 'GET' \
