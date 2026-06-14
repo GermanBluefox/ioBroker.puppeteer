@@ -162,24 +162,12 @@ sendTo('puppeteer.0', 'screenshot', { url: 'https://www.google.com',
 ```
 
 ## Web server
-The adapter also provides a web server which allows triggering screenshots by calling a link.
-The web server is active when the adapter is running and listens on port 10000 (configurable) by default.
-You can trigger a screenshot by calling `http://<ioBroker-IP>:10000?url=<URL>` where URL is the url you want to screenshot.
-You can also specify additional parameters:
-- `fullPage=true` to take a screenshot of the full page
-- `waitForSelector=#testId` to wait for a given selector before taking the screenshot
-- `renderTime=5000` to wait for a given time in ms before taking the screenshot
-- `width=800&height=600` to specify the viewport size for the screenshot
-- `clipLeft=0&clipTop=0&clipWidth=800&clipHeight=600` to specify the crop options for the screenshot
-- `quality=80` to specify the quality of the screenshot (only for jpg)
-- `omitBackground=true` to hide the default white background and allow capturing screenshots with transparency
-- `encoding=base64` to specify the encoding of the image (default is binary)
-- `captureBeyondViewport=true` to allow taking screenshots bigger than the viewport (default is true)
-- `type=jpg/png` to specify the type of the screenshot (default is png)
-- `waitUntil=load|domcontentloaded|networkidle0|networkidle2` controls when navigation is considered finished (default: `networkidle2`). See **Tips for live-data dashboards** below.
-- `navigationTimeout=15000` maximum time in ms for `page.goto()` and subsequent waits (default: `30000`). Lower values free up renderer processes faster when a page hangs.
-
-The response is the binary representation of the image that can be directly displayed in the browser or base64 string as `{ result: "base64" }` depending on the specified encoding.
+You can use the `rest-api` adapter to get the response for sendTo operations via http:
+```bash
+curl -X 'GET' \
+  'http://192.168.1.129:8093/v1/sendto/puppeteer.0?message=screenshot&data=%7B%22url%22%3A%22http%3A%2F%2F192.168.1.129%3A8082%2Fvis-2%2F%3Fmain%23SeeedColor%22%2C%22ioBrokerOptions%22%3A%7B%22storagePath%22%3A%22color.png%22%7D%2C%22waitOption%22%3A%7B%22waitForSelector%22%3A%22.battery%22%7D%2C%22viewportOptions%22%3A%7B%22width%22%3A800%2C%22height%22%3A480%7D%2C%22captureBeyondViewport%22%3Afalse%2C%22waitUntil%22%3A%22load%22%7D&responseContentType=image%2Fpng' \
+  -H 'accept: application/json'
+```
 
 ### Tips for live-data dashboards (vis / vis-2 / Lovelace / Grafana)
 The default `waitUntil=networkidle2` waits until the page has fewer than three open network connections for 500 ms. Dashboards that hold a permanent WebSocket or Server-Sent-Events connection — including **ioBroker vis / vis-2**, **Home Assistant Lovelace** and **Grafana** — never reach that state, so every screenshot will block until `navigationTimeout` (default 30 s) elapses. While the page hangs, its Chromium renderer process keeps eating ~100–200 MB RSS.
@@ -191,12 +179,12 @@ For these dashboards use:
 
 Suggested ready selectors:
 
-| Dashboard | Selector |
-|-----------|----------|
-| ioBroker vis 1 | `#vis_container .vis-view` |
-| ioBroker vis-2 | `#materialUI` |
+| Dashboard               | Selector                                                                           |
+|-------------------------|------------------------------------------------------------------------------------|
+| ioBroker vis 1          | `#vis_container .vis-view`                                                         |
+| ioBroker vis-2          | `#materialUI`                                                                      |
 | Home Assistant Lovelace | `home-assistant-main` (and optionally `hui-view ha-card` once cards have rendered) |
-| Grafana | `.panel-content` or `.dashboard-container` |
+| Grafana                 | `.panel-content` or `.dashboard-container`                                         |
 
 Optional: append a small `waitForTimeout` (e.g. `200`) for chart animations to settle.
 
